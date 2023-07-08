@@ -28,7 +28,7 @@ from transformers import (
     LlamaTokenizer
 
 )
-from datasets import load_dataset, Dataset
+from datasets import load_dataset, concatenate_datasets, Dataset, DatasetDict
 import evaluate
 
 from peft import (
@@ -453,6 +453,24 @@ def extract_alpaca_dataset(example):
         prompt_format = ALPACA_PROMPT_DICT["prompt_no_input"]
     return {'input': prompt_format.format(**example)}
 
+def convert_instruction(item):
+    instruction = item['instruction']
+    prompt_format = "人間と人工知能のアシスタントの会話です。人間の質問に対して、アシスタントが親切・丁寧・詳細に回答してください。\n\n"
+    return {'input': prompt_format + f"### Human:\n{instruction}\n\n### Assistant:\n", 'output': item['output'] + "<|endoftext|>"}
+
+def convert_chat(item):
+    pattern = r'<|im_start|>(.*?)<|im_end|>'
+    matches = re.findall(pattern, item['prompt'], re.DOTALL)
+    matches = list(filter(lambda item: item.strip() != '', matches))[1:]
+    prompt = "人間と人工知能のアシスタントの会話です。人間の質問に対して、アシスタントが親切・丁寧・詳細に回答してください。\n\n"
+    for i, text in enumerate(matches):
+      if i % 2 == 0:
+        prompt += f"### Human:\n{text}\n\n".replace("user\n", "")
+      else:
+        prompt += f"### Assistant:\n{text}\n\n".replace("assistant\n", "")
+    prompt += "### Assistant:\n"
+    return {'input': prompt, 'output': item["response"].replace("<|endoftext|>", "")}
+
 def local_dataset(dataset_name):
     if dataset_name.endswith(('.json', '.jsonl')):
         full_dataset = Dataset.from_json(path_or_paths=dataset_name)
@@ -507,6 +525,22 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
             return load_dataset("timdettmers/openassistant-guanaco")
         elif dataset_name == 'vicuna':
             raise NotImplementedError("Vicuna data was not released.")
+        elif dataset_name == 'alpaca-ja':
+            return load_dataset("fujiki/japanese_alpaca_data")
+        elif dataset_name == 'chat-ja':
+            dataset1 = load_dataset("kunishou/databricks-dolly-15k-ja")
+            dataset1 = dataset1.map(convert_instruction, remove_columns=["input", "instruction", "category", "index"])
+            
+            dataset2 = load_dataset("kunishou/hh-rlhf-49k-ja")
+            dataset2 = dataset2.map(convert_instruction, remove_columns=["input", "instruction", "instruction_en", "ng_translation", "index", "output_en"])
+            
+            dataset3 = load_dataset("aidealab/oasst1-ja")
+            dataset3 = dataset3.map(convert_chat, remove_columns=["prompt", "response"])
+            
+            concatenate_data = concatenate_datasets([dataset1['train'], dataset2['train'], dataset3['train']])
+            dataset = DatasetDict()
+            dataset['train'] = concatenate_data
+            return dataset
         else:
             if os.path.exists(dataset_name):
                 try:
@@ -547,6 +581,8 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
                 'input': AIROBOROS_PROMPT.format(instruction=x["instruction"]),
                 'output': x['response'],
             })
+        elif dataset_format == 'alpaca-ja':
+            dataset = dataset.map(extract_alpaca_dataset, remove_columns=['instruction'])
         elif dataset_format == 'input-output':
             # leave as is
             pass
